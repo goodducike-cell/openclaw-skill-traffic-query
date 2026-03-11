@@ -12,12 +12,19 @@
 
 ```text
 .
-├── SKILL.md
-├── config.example.json
 ├── README.md
-└── scripts/
-    └── traffic_query.py
+├── dist/
+│   └── traffic-query.skill
+└── skills/
+    └── traffic-query/
+        ├── SKILL.md
+        ├── config.example.json
+        └── scripts/
+            ├── traffic.py
+            └── train.py
 ```
+
+说明：实际可安装 skill 目录是 `skills/traffic-query/`。
 
 ## 安装
 
