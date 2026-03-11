@@ -1,23 +1,15 @@
 {
-  "amap_key": "YOUR_AMAP_API_KEY",
-  "home": {
-    "name": "我的家",
-    "city": "深圳",
-    "full_address": "深圳市南山区XX小区"
-  },
-  "work": {
-    "name": "公司",
-    "city": "深圳",
-    "full_address": "深圳市南山区XX产业园"
-  },
-  "commute": {
-    "morning": {
-      "time_range": ["08:00", "08:30"],
-      "reminder_time": "07:45"
+  "amap_key": "YOUR_AMAP_WEB_SERVICE_KEY",
+  "aliases": {
+    "home": {
+      "name": "家",
+      "city": "深圳",
+      "full_address": "深圳市南山区科技园"
     },
-    "evening": {
-      "time_range": ["18:00", "18:30"],
-      "reminder_time": "17:45"
+    "work": {
+      "name": "公司",
+      "city": "深圳",
+      "full_address": "深圳市南山区软件产业基地"
     }
   }
 }

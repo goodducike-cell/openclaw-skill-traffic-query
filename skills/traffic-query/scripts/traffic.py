@@ -1,316 +1,275 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-交通查询助手 - 基于高德地图API
-功能：路线规划、实时路况、POI搜索、高铁查询
-"""
-
 import argparse
 import json
 import os
-import urllib.request
+import sys
+import urllib.error
 import urllib.parse
-from datetime import datetime, timedelta
+import urllib.request
+from pathlib import Path
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_PATH = os.path.join(SCRIPT_DIR, '..', 'config.json')
-
-def _load_config():
-    try:
-        with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except FileNotFoundError:
-        print(f"❌ 配置文件不存在: {CONFIG_PATH}")
-        print("请复制 config.example.json 为 config.json 并填入高德 API Key")
-        exit(1)
-
-_config = _load_config()
-AMAP_KEY = os.environ.get('AMAP_KEY') or _config.get('amap_key', '')
-if not AMAP_KEY or AMAP_KEY == 'YOUR_AMAP_API_KEY':
-    print("❌ 请在 config.json 中配置 amap_key 或设置 AMAP_KEY 环境变量")
-    exit(1)
-
-AMAP_BASE_URL = "https://restapi.amap.com/v3"
+SCRIPT_DIR = Path(__file__).resolve().parent
+SKILL_DIR = SCRIPT_DIR.parent
+CONFIG_PATH = SKILL_DIR / "config.json"
+CONFIG_EXAMPLE_PATH = SKILL_DIR / "config.example.json"
+AMAP_BASE = "https://restapi.amap.com"
 
 
-def geocode(address, city=None):
-    """地址转经纬度"""
-    url = f"{AMAP_BASE_URL}/geocode/geo?key={AMAP_KEY}&address={urllib.parse.quote(address)}"
-    if city:
-        url += f"&city={urllib.parse.quote(city)}"
-    
-    try:
-        with urllib.request.urlopen(url, timeout=10) as response:
-            data = json.loads(response.read().decode('utf-8'))
-            if data['status'] == '1' and data['geocodes']:
-                location = data['geocodes'][0]['location']
-                return location.split(',')
-            else:
-                return None, None
-    except Exception as e:
-        print(f"❌ 地理编码失败: {e}")
-        return None, None
+class TrafficQueryError(Exception):
+    pass
 
 
-def reverse_geocode(lng, lat):
-    """经纬度转地址"""
-    url = f"{AMAP_BASE_URL}/geocode/regeo?key={AMAP_KEY}&location={lng},{lat}"
-    
-    try:
-        with urllib.request.urlopen(url, timeout=10) as response:
-            data = json.loads(response.read().decode('utf-8'))
-            if data['status'] == '1':
-                return data['regeocode']['formatted_address']
-            return None
-    except Exception as e:
-        print(f"❌ 逆地理编码失败: {e}")
-        return None
+def load_config():
+    if CONFIG_PATH.exists():
+        return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    if CONFIG_EXAMPLE_PATH.exists():
+        return json.loads(CONFIG_EXAMPLE_PATH.read_text(encoding="utf-8"))
+    return {}
 
 
-def get_route(origin, destination, strategy=0):
-    """
-    驾车路线规划
-    strategy: 0-速度优先, 1-费用优先, 2-距离优先, 4-躲避拥堵
-    """
-    # 先将地址转为经纬度
-    origin_lng, origin_lat = geocode(origin)
-    dest_lng, dest_lat = geocode(destination)
-    
-    if not origin_lng or not dest_lng:
-        print("❌ 无法识别起点或终点地址")
-        return None
-    
-    url = f"{AMAP_BASE_URL}/direction/driving?key={AMAP_KEY}"
-    url += f"&origin={origin_lng},{origin_lat}"
-    url += f"&destination={dest_lng},{dest_lat}"
-    url += f"&strategy={strategy}"
-    url += "&extensions=all"
-    
-    try:
-        with urllib.request.urlopen(url, timeout=15) as response:
-            data = json.loads(response.read().decode('utf-8'))
-            
-            if data['status'] != '1':
-                print(f"❌ 路线规划失败: {data.get('info', '未知错误')}")
-                return None
-            
-            return data
-    except Exception as e:
-        print(f"❌ 请求失败: {e}")
-        return None
+def get_api_key(args, config):
+    key = args.api_key or os.getenv("TRAFFIC_QUERY_AMAP_KEY") or config.get("amap_key")
+    if not key or key == "YOUR_AMAP_WEB_SERVICE_KEY":
+        raise TrafficQueryError(
+            "Missing AMap API key. Set --api-key, TRAFFIC_QUERY_AMAP_KEY, or config.json.amap_key"
+        )
+    return key
 
 
-def get_traffic_status(road_name, city=None):
-    """查询道路实时路况"""
-    # 使用POI搜索找到道路
-    url = f"{AMAP_BASE_URL}/place/text?key={AMAP_KEY}"
-    url += f"&keywords={urllib.parse.quote(road_name)}"
-    url += "&types=190301"  # 道路附属设施
-    if city:
-        url += f"&city={urllib.parse.quote(city)}"
-    
-    try:
-        with urllib.request.urlopen(url, timeout=10) as response:
-            data = json.loads(response.read().decode('utf-8'))
-            
-            if data['status'] != '1' or not data['pois']:
-                print(f"❌ 未找到道路: {road_name}")
-                return None
-            
-            return data['pois']
-    except Exception as e:
-        print(f"❌ 查询失败: {e}")
-        return None
+def http_get_json(path, params):
+    query = urllib.parse.urlencode(params)
+    url = f"{AMAP_BASE}{path}?{query}"
+    req = urllib.request.Request(url, headers={"User-Agent": "openclaw-traffic-query/1.0"})
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        charset = resp.headers.get_content_charset() or "utf-8"
+        data = resp.read().decode(charset)
+    payload = json.loads(data)
+    if str(payload.get("status")) != "1":
+        raise TrafficQueryError(payload.get("info") or payload.get("infocode") or "AMap API error")
+    return payload
 
 
-def search_poi(location, keywords, radius=3000):
-    """搜索附近POI"""
-    # 先获取位置经纬度
-    lng, lat = geocode(location)
-    if not lng:
-        print(f"❌ 无法识别位置: {location}")
-        return None
-    
-    url = f"{AMAP_BASE_URL}/place/around?key={AMAP_KEY}"
-    url += f"&location={lng},{lat}"
-    url += f"&keywords={urllib.parse.quote(keywords)}"
-    url += f"&radius={radius}"
-    url += "&offset=20"
-    url += "&extensions=all"
-    
-    try:
-        with urllib.request.urlopen(url, timeout=10) as response:
-            data = json.loads(response.read().decode('utf-8'))
-            
-            if data['status'] != '1':
-                print(f"❌ POI搜索失败: {data.get('info', '未知错误')}")
-                return None
-            
-            return data['pois']
-    except Exception as e:
-        print(f"❌ 请求失败: {e}")
-        return None
+def aliases(config):
+    return config.get("aliases") or {}
 
 
-def search_train(from_station, to_station, date=None):
-    """查询高铁/动车班次（通过12306网页爬取或第三方API）"""
-    if not date:
-        date = datetime.now().strftime('%Y-%m-%d')
-    
-    # 使用携程API（公开接口）
-    url = "https://train.qunar.com/qunar/checiInfo.htm"
-    params = {
-        'from_station': from_station,
-        'to_station': to_station,
-        'date': date
-    }
-    
-    print(f"\n🚄 查询 {from_station} → {to_station} ({date})")
-    print("─" * 50)
-    print("💡 提示：高铁实时查询需要12306官方API，此处提供参考信息")
-    print("   建议使用 12306 App 或 携程App 查看实时余票")
-    print("─" * 50)
-    
-    # 返回常用高铁信息格式
+def normalize_alias(name, config):
+    raw = (name or "").strip()
+    if not raw:
+        return raw
+    mapping = aliases(config)
+    if raw in mapping:
+        alias = mapping[raw]
+        return alias.get("full_address") or alias.get("name") or raw
+    for key, alias in mapping.items():
+        alias_name = str(alias.get("name") or "").strip()
+        if raw == alias_name:
+            return alias.get("full_address") or raw
+        if raw in {"家", "我家"} and key == "home":
+            return alias.get("full_address") or raw
+        if raw in {"公司", "单位", "上班地点"} and key == "work":
+            return alias.get("full_address") or raw
+    return raw
+
+
+def geocode(address, city, key, config):
+    query_address = normalize_alias(address, config)
+    payload = http_get_json(
+        "/v3/geocode/geo",
+        {"key": key, "address": query_address, **({"city": city} if city else {})},
+    )
+    geocodes = payload.get("geocodes") or []
+    if not geocodes:
+        raise TrafficQueryError(f"Geocode failed: {query_address}")
+    top = geocodes[0]
+    location = top.get("location")
+    if not location:
+        raise TrafficQueryError(f"Missing location for: {query_address}")
     return {
-        'from': from_station,
-        'to': to_station,
-        'date': date,
-        'note': '请使用12306或携程App查询实时班次和余票'
+        "query": address,
+        "resolved": query_address,
+        "formatted_address": top.get("formatted_address") or query_address,
+        "location": location,
+        "city": top.get("city") or city,
     }
 
 
-def format_route_result(data, origin_name, dest_name):
-    """格式化路线规划结果"""
-    if not data or 'route' not in data:
-        return "❌ 无法获取路线信息"
-    
-    route = data['route']['paths'][0]
-    
-    result = []
-    result.append(f"\n🚗 路线规划：{origin_name} → {dest_name}")
-    result.append("═" * 50)
-    
-    # 基本信息
-    distance = int(route['distance']) / 1000
-    duration = int(route['duration']) / 60
-    tolls = int(route.get('tolls', 0))
-    traffic_lights = route.get('trafficLightsCount', 'N/A')
-    
-    result.append(f"📏 总距离：{distance:.1f} 公里")
-    result.append(f"⏱️ 预计时间：{int(duration)} 分钟 ({duration/60:.1f} 小时)")
-    result.append(f"💰 预估路费：¥{tolls}")
-    result.append(f"🚦 红绿灯：{traffic_lights} 个")
-    
-    # 路况摘要
-    if 'restriction' in route:
-        result.append(f"⚠️ 限行提示：{route['restriction']}")
-    
-    # 详细路线
-    result.append("\n📋 详细路线：")
-    result.append("─" * 50)
-    
-    for i, step in enumerate(route['steps'][:10], 1):  # 最多显示10步
-        instruction = step['instruction'].replace('<br>', ' ').strip()
-        road = step.get('road', '')
-        distance_step = int(step['distance']) / 1000
-        
+def route_command(args, config):
+    key = get_api_key(args, config)
+    origin = geocode(args.origin, args.city, key, config)
+    destination = geocode(args.destination, args.city, key, config)
+    payload = http_get_json(
+        "/v3/direction/driving",
+        {
+            "key": key,
+            "origin": origin["location"],
+            "destination": destination["location"],
+            "extensions": "all",
+            "strategy": args.strategy,
+        },
+    )
+    route = payload.get("route") or {}
+    paths = route.get("paths") or []
+    if not paths:
+        raise TrafficQueryError("No driving route returned")
+    path = paths[0]
+    duration_sec = int(float(path.get("duration") or 0))
+    distance_m = int(float(path.get("distance") or 0))
+    tolls = path.get("tolls") or "0"
+    traffic_lights = path.get("traffic_lights") or path.get("trafficLightsCount") or "0"
+    taxi_cost = route.get("taxi_cost") or ""
+    print(f"路线: {origin['formatted_address']} -> {destination['formatted_address']}")
+    print(f"距离: {distance_m / 1000:.1f} km")
+    print(f"预计用时: {format_duration(duration_sec)}")
+    print(f"过路费: ¥{tolls}")
+    if taxi_cost:
+        print(f"打车参考: ¥{taxi_cost}")
+    print(f"红绿灯: {traffic_lights}")
+    steps = path.get("steps") or []
+    for idx, step in enumerate(steps[: args.steps], start=1):
+        instruction = (step.get("instruction") or "").replace("<br>", " ").strip()
+        road = (step.get("road") or "").strip()
+        step_distance = step.get("distance") or "0"
+        tmcs = step.get("tmcs") or []
+        statuses = [t.get("status") for t in tmcs if t.get("status")]
+        summary = summarize_statuses(statuses)
+        line = f"{idx}. {instruction}"
         if road:
-            result.append(f"{i}. {instruction} ({distance_step:.1f}km)")
-        else:
-            result.append(f"{i}. {instruction}")
-    
-    if len(route['steps']) > 10:
-        result.append(f"... 共 {len(route['steps'])} 个导航点")
-    
-    return '\n'.join(result)
+            line += f" | 道路: {road}"
+        line += f" | {int(float(step_distance))}m"
+        if summary:
+            line += f" | 路况: {summary}"
+        print(line)
 
 
-def format_poi_result(pois, keywords):
-    """格式化POI搜索结果"""
+def traffic_road_command(args, config):
+    key = get_api_key(args, config)
+    payload = http_get_json(
+        "/v3/traffic/status/road",
+        {"key": key, "name": args.road, **({"city": args.city} if args.city else {}), "extensions": "all"},
+    )
+    info = payload.get("trafficinfo") or {}
+    print(f"道路: {info.get('description') or args.road}")
+    if info.get("evaluation"):
+        print(f"评估: {info['evaluation']}")
+    if info.get("status"):
+        print(f"状态: {info['status']}")
+    if info.get("speed"):
+        print(f"平均速度: {info['speed']} km/h")
+    if info.get("direction"):
+        print(f"方向: {info['direction']}")
+    if info.get("angle"):
+        print(f"角度: {info['angle']}")
+    if info.get("description"):
+        print(f"说明: {info['description']}")
+
+
+def poi_command(args, config):
+    key = get_api_key(args, config)
+    params = {
+        "key": key,
+        "keywords": args.keyword,
+        "offset": args.limit,
+        "page": 1,
+        "extensions": "all",
+    }
+    if args.city:
+        params["city"] = args.city
+        params["citylimit"] = "true" if args.city_limit else "false"
+    if args.around:
+        center = geocode(args.around, args.city, key, config)
+        params["location"] = center["location"]
+        params["sortrule"] = "distance"
+    payload = http_get_json("/v5/place/text", params)
+    pois = payload.get("pois") or []
     if not pois:
-        return f"❌ 未找到相关 {keywords}"
-    
-    result = []
-    result.append(f"\n📍 附近{keywords}（共 {len(pois)} 家）")
-    result.append("═" * 50)
-    
-    for i, poi in enumerate(pois[:15], 1):
-        name = poi['name']
-        address = poi.get('address', '地址不详')
-        distance = int(poi.get('distance', 0))
-        type_code = poi.get('typecode', '')
-        
-        # 评分（如果有）
-        rating = poi.get('biz_ext', {}).get('rating', '')
-        cost = poi.get('biz_ext', {}).get('cost', '')
-        
-        line = f"{i}. {name}"
-        if rating:
-            line += f" ⭐{rating}"
-        if cost:
-            line += f" 💰人均¥{cost}"
-        line += f"\n   📍 {address}"
-        if distance > 0:
-            line += f" ({distance}米)"
-        
-        result.append(line)
-    
-    return '\n'.join(result)
+        raise TrafficQueryError("No POI results")
+    for idx, poi in enumerate(pois[: args.limit], start=1):
+        name = poi.get("name") or "未知"
+        address = poi.get("address") or poi.get("adname") or ""
+        distance = poi.get("distance")
+        tel = ",".join(poi.get("tel") or []) if isinstance(poi.get("tel"), list) else (poi.get("tel") or "")
+        biz = poi.get("business") or ""
+        type_name = poi.get("type") or ""
+        line = f"{idx}. {name}"
+        if type_name:
+            line += f" | {type_name}"
+        if address:
+            line += f" | {address}"
+        if biz:
+            line += f" | 商圈: {biz}"
+        if distance not in (None, ""):
+            line += f" | 距离: {distance}m"
+        if tel:
+            line += f" | 电话: {tel}"
+        print(line)
+
+
+def summarize_statuses(statuses):
+    if not statuses:
+        return ""
+    order = ["未知", "畅通", "缓行", "拥堵", "严重拥堵"]
+    unique = []
+    for status in statuses:
+        if status not in unique:
+            unique.append(status)
+    unique.sort(key=lambda s: order.index(s) if s in order else len(order))
+    return "/".join(unique)
+
+
+def format_duration(seconds):
+    hours, rem = divmod(seconds, 3600)
+    minutes, _ = divmod(rem, 60)
+    parts = []
+    if hours:
+        parts.append(f"{hours}小时")
+    if minutes or not parts:
+        parts.append(f"{minutes}分钟")
+    return "".join(parts)
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(description="OpenClaw traffic-query skill helper")
+    parser.add_argument("--api-key", help="AMap Web Service API key")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    route = sub.add_parser("route", help="Driving route with traffic")
+    route.add_argument("--from", dest="origin", required=True, help="Origin address or alias")
+    route.add_argument("--to", dest="destination", required=True, help="Destination address or alias")
+    route.add_argument("--city", help="Optional city for geocoding")
+    route.add_argument("--strategy", default="0", help="AMap driving strategy, default 0")
+    route.add_argument("--steps", type=int, default=5, help="How many route steps to print")
+    route.set_defaults(func=route_command)
+
+    road = sub.add_parser("traffic-road", help="Road traffic status")
+    road.add_argument("--road", required=True, help="Road name")
+    road.add_argument("--city", help="City name")
+    road.set_defaults(func=traffic_road_command)
+
+    poi = sub.add_parser("poi", help="POI text search")
+    poi.add_argument("--keyword", required=True, help="Keyword like 咖啡/景点/医院")
+    poi.add_argument("--city", help="City name")
+    poi.add_argument("--city-limit", action="store_true", help="Limit search to the city")
+    poi.add_argument("--around", help="Address or alias used as search center")
+    poi.add_argument("--limit", type=int, default=5, help="How many results to print")
+    poi.set_defaults(func=poi_command)
+
+    return parser
 
 
 def main():
-    parser = argparse.ArgumentParser(description='交通查询助手')
-    subparsers = parser.add_subparsers(dest='command', help='命令')
-    
-    # 路线规划
-    route_parser = subparsers.add_parser('route', help='路线规划')
-    route_parser.add_argument('--origin', '-o', required=True, help='起点地址')
-    route_parser.add_argument('--destination', '-d', required=True, help='终点地址')
-    route_parser.add_argument('--strategy', '-s', type=int, default=4, 
-                             help='策略：0-速度优先，1-费用优先，2-距离优先，4-躲避拥堵')
-    
-    # 实时路况
-    traffic_parser = subparsers.add_parser('traffic', help='实时路况')
-    traffic_parser.add_argument('--road', '-r', required=True, help='道路名称')
-    traffic_parser.add_argument('--city', '-c', help='城市名称')
-    
-    # POI搜索
-    poi_parser = subparsers.add_parser('poi', help='POI搜索')
-    poi_parser.add_argument('--location', '-l', required=True, help='位置')
-    poi_parser.add_argument('--keywords', '-k', required=True, help='关键词')
-    poi_parser.add_argument('--radius', '-r', type=int, default=3000, help='搜索半径(米)')
-    
-    # 高铁查询
-    train_parser = subparsers.add_parser('train', help='高铁查询')
-    train_parser.add_argument('--from', '-f', required=True, dest='from_station', help='出发站')
-    train_parser.add_argument('--to', '-t', required=True, dest='to_station', help='到达站')
-    train_parser.add_argument('--date', '-d', help='日期 (YYYY-MM-DD)')
-    
+    parser = build_parser()
     args = parser.parse_args()
-    
-    if args.command == 'route':
-        data = get_route(args.origin, args.destination, args.strategy)
-        print(format_route_result(data, args.origin, args.destination))
-    
-    elif args.command == 'traffic':
-        pois = get_traffic_status(args.road, args.city)
-        if pois:
-            print(f"\n🛣️ 道路查询：{args.road}")
-            print("═" * 50)
-            for poi in pois[:5]:
-                print(f"📍 {poi['name']} - {poi.get('address', '地址不详')}")
-    
-    elif args.command == 'poi':
-        pois = search_poi(args.location, args.keywords, args.radius)
-        print(format_poi_result(pois, args.keywords))
-    
-    elif args.command == 'train':
-        search_train(args.from_station, args.to_station, args.date)
-    
-    else:
-        parser.print_help()
+    config = load_config()
+    try:
+        args.func(args, config)
+    except TrafficQueryError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(2)
+    except urllib.error.URLError as exc:
+        print(f"ERROR: Network failure: {exc}", file=sys.stderr)
+        sys.exit(3)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

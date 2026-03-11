@@ -1,67 +1,59 @@
 ---
 name: traffic-query
-description: 出行交通查询助手，支持路况查询、高峰分析、高铁查询、美食推荐。触发词：路况、上班路况、高峰、拥堵、高铁、出行、附近美食、吃什么、去哪吃。Use when user asks about traffic conditions, commute status, train schedules, or nearby restaurants.
+description: 查询中国城市出行信息：驾车路线规划、道路实时路况、POI 搜索与附近美食/景点推荐，基于高德地图 Web API。用户提到路况、堵不堵、怎么去、附近有什么好吃的/景点、从 A 到 B 多久/多少钱时使用。高铁场景仅调用 train.py 作为参考查询，不要承诺实时余票准确性。
+license: MIT
+metadata: {"clawdbot":{"emoji":"🚗","requires":{"bins":["python3"]}}}
 ---
 
-# 交通查询助手
+# Traffic Query
 
-基于高德地图API的出行助手，提供路况查询、高峰分析、高铁查询和美食推荐功能。
+Use the bundled Python scripts instead of hand-writing HTTP requests.
 
-## 前置条件
-
-1. 高德地图 Web 服务 API Key（免费申请：https://lbs.amap.com）
-2. 配置好 `config.json`（首次使用需从模板复制并填写）
-
-## 安装后设置
+## Setup
 
 ```bash
 cd ~/.openclaw/workspace/skills/traffic-query
 cp config.example.json config.json
-# 编辑 config.json，填入你的高德 API Key 和常用地址
 ```
 
-## 快速使用
+Fill `config.json.amap_key`.
 
-### 1. 查询上班路况
+The traffic script reads the API key in this order:
+1. `--api-key`
+2. `TRAFFIC_QUERY_AMAP_KEY`
+3. `config.json` → `amap_key`
+
+## Commands
+
+### Driving route
+
 ```bash
-python3 ~/.openclaw/workspace/skills/traffic-query/scripts/traffic.py route --origin "起点地址" --destination "终点地址"
+python3 ~/.openclaw/workspace/skills/traffic-query/scripts/traffic.py route --from "深圳北站" --to "腾讯滨海大厦"
 ```
 
-### 2. 查询实时路况
+### Road traffic
+
 ```bash
-python3 ~/.openclaw/workspace/skills/traffic-query/scripts/traffic.py traffic --road "道路名称"
+python3 ~/.openclaw/workspace/skills/traffic-query/scripts/traffic.py traffic-road --road "深南大道" --city "深圳"
 ```
 
-### 3. 查询附近美食
+### POI search
+
 ```bash
-python3 ~/.openclaw/workspace/skills/traffic-query/scripts/traffic.py poi --location "位置" --keywords "美食"
+python3 ~/.openclaw/workspace/skills/traffic-query/scripts/traffic.py poi --keyword "咖啡" --city "深圳" --around "腾讯滨海大厦"
 ```
 
-### 4. 查询高铁班次
+### Train reference query
+
 ```bash
-python3 ~/.openclaw/workspace/skills/traffic-query/scripts/traffic.py train --from "深圳北" --to "广州南" --date "2026-03-10"
+python3 ~/.openclaw/workspace/skills/traffic-query/scripts/train.py 深圳北 广州南 2026-03-12
 ```
 
-## 功能说明
+Use this only as a reference output. If the user needs accurate real-time ticket inventory, explicitly direct them to 12306.
 
-| 功能 | 命令 | 说明 |
-|------|------|------|
-| 路线规划 | `route` | 驾车路线，包含实时路况、预计时间 |
-| 实时路况 | `traffic` | 指定道路的拥堵情况 |
-| POI搜索 | `poi` | 搜索附近餐饮、景点等 |
-| 高铁查询 | `train` | 查询高铁/动车班次 |
+## Output handling
 
-## 配置说明
-
-编辑 `config.json` 设置你的常用地址：
-
-```json
-{
-  "home": { "name": "我的家", "city": "深圳", "full_address": "深圳XX小区" },
-  "work": { "name": "公司", "city": "深圳", "full_address": "深圳XX产业园" }
-}
-```
-
-## API 文档
-
-详细 API 文档见：https://lbs.amap.com/api/webservice/summary
+- Return the conclusion first.
+- Include ETA / distance / toll / congestion level when available.
+- If geocoding fails, say which address failed.
+- If the user says “家/公司”, prefer aliases from `config.json`.

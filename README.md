@@ -1,70 +1,98 @@
-# OpenClaw Skill: 交通查询助手
+# OpenClaw Skill: traffic-query
 
-让 OpenClaw 具备出行交通查询能力，基于高德地图 API。
+基于高德地图 Web API 的 OpenClaw 出行查询技能。
 
-## 功能
+## 已实现能力
 
-| 功能 | 说明 |
-|------|------|
-| 路线规划 | 驾车路线 + 实时路况 + 预计用时 + 费用 |
-| 实时路况 | 查询指定道路拥堵情况 |
-| POI 搜索 | 搜索附近美食、景点等 |
-| 高铁查询 | 查询高铁/动车班次（12306） |
+- 驾车路线规划：距离、预计用时、过路费、分段路况
+- 指定道路实时路况：查询某条路当前拥堵情况
+- POI 搜索：附近美食、景点、医院、咖啡店等
+
+## 仓库结构
+
+```text
+.
+├── SKILL.md
+├── config.example.json
+├── README.md
+└── scripts/
+    └── traffic_query.py
+```
 
 ## 安装
+
+### 方式 1：直接从 GitHub 安装
 
 ```bash
 npx clawhub add https://github.com/Evan-ST/openclaw-skill-traffic-query --skill traffic-query -g
 ```
 
-## 配置
+### 方式 2：本地打包后安装
 
-安装后需要配置高德 API Key 和常用地址：
+```bash
+python /opt/homebrew/lib/node_modules/openclaw/skills/skill-creator/scripts/package_skill.py . dist
+```
+
+生成：`dist/traffic-query.skill`
+
+## 配置
 
 ```bash
 cd ~/.openclaw/workspace/skills/traffic-query
 cp config.example.json config.json
 ```
 
-编辑 `config.json`：
+填写你的高德 Web 服务 Key：
 
 ```json
 {
-  "amap_key": "你的高德API Key",
-  "home": {
-    "name": "我的家",
-    "city": "深圳",
-    "full_address": "深圳市XX小区"
-  },
-  "work": {
-    "name": "公司",
-    "city": "深圳",
-    "full_address": "深圳市XX产业园"
+  "amap_key": "YOUR_AMAP_WEB_SERVICE_KEY",
+  "aliases": {
+    "home": {
+      "name": "家",
+      "city": "深圳",
+      "full_address": "深圳市南山区科技园"
+    },
+    "work": {
+      "name": "公司",
+      "city": "深圳",
+      "full_address": "深圳市南山区软件产业基地"
+    }
   }
 }
 ```
 
-### 获取高德 API Key
+也支持用环境变量：
 
-1. 注册 [高德开放平台](https://lbs.amap.com) 账号
-2. 创建应用 → 添加 Key → 选择 "Web服务"
-3. 将 Key 填入 `config.json` 的 `amap_key` 字段
+```bash
+export TRAFFIC_QUERY_AMAP_KEY="你的Key"
+```
 
-## 使用示例
+## 手动测试
 
-在飞书/微信等渠道对 OpenClaw 说：
+### 路线规划
 
-- "上班路况怎么样？"
-- "深南大道现在堵不堵？"
-- "附近有什么好吃的？"
-- "深圳到广州的高铁"
+```bash
+python3 scripts/traffic_query.py route --from "深圳北站" --to "腾讯滨海大厦"
+```
 
-## 前置条件
+### 实时路况
 
-- OpenClaw 已安装并运行
-- 高德地图 Web 服务 API Key（免费）
-- Python 3.6+
+```bash
+python3 scripts/traffic_query.py traffic-road --road "深南大道" --city "深圳"
+```
 
-## 许可
+### POI 搜索
+
+```bash
+python3 scripts/traffic_query.py poi --keyword "咖啡" --city "深圳" --around "腾讯滨海大厦"
+```
+
+## 当前限制
+
+- 当前版本未实现 12306 / 高铁查询
+- 依赖高德地图 Web 服务 API Key
+
+## License
 
 MIT
