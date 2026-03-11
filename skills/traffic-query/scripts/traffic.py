@@ -39,7 +39,7 @@ def get_api_key(args, config):
 def http_get_json(path, params):
     query = urllib.parse.urlencode(params)
     url = f"{AMAP_BASE}{path}?{query}"
-    req = urllib.request.Request(url, headers={"User-Agent": "openclaw-traffic-query/1.0"})
+    req = urllib.request.Request(url, headers={"User-Agent": "openclaw-traffic-query/1.1"})
     with urllib.request.urlopen(req, timeout=20) as resp:
         charset = resp.headers.get_content_charset() or "utf-8"
         data = resp.read().decode(charset)
@@ -72,32 +72,140 @@ def normalize_alias(name, config):
     return raw
 
 
-def geocode(address, city, key, config):
-    query_address = normalize_alias(address, config)
+def poi_search(keyword, city, key, location=None, limit=5, city_limit=False):
+    params = {
+        "key": key,
+        "keywords": keyword,
+        "offset": max(limit, 5),
+        "page": 1,
+        "extensions": "all",
+    }
+    if city:
+        params["city"] = city
+        params["citylimit"] = "true" if city_limit else "false"
+    if location:
+        params["location"] = location
+        params["sortrule"] = "distance"
+    payload = http_get_json("/v5/place/text", params)
+    return payload.get("pois") or []
+
+
+def score_poi_match(query, poi):
+    query = (query or "").strip().lower()
+    name = str(poi.get("name") or "").strip().lower()
+    address = str(poi.get("address") or "").strip().lower()
+    adname = str(poi.get("adname") or "").strip().lower()
+    type_name = str(poi.get("type") or "").strip().lower()
+    score = 0
+    if query == name:
+        score += 100
+    if query and query in name:
+        score += 40
+    if query and query in address:
+        score += 20
+    if query and query in adname:
+        score += 10
+    if any(k in type_name for k in ["商务住宅", "公司企业", "购物", "餐饮", "风景名胜", "医院", "学校"]):
+        score += 5
+    distance = poi.get("distance")
+    try:
+        if distance not in (None, ""):
+            d = int(distance)
+            score += max(0, 20 - min(d // 200, 20))
+    except Exception:
+        pass
+    return score
+
+
+def format_poi_candidate(poi):
+    name = poi.get("name") or "未知"
+    address = poi.get("address") or poi.get("adname") or ""
+    city = poi.get("cityname") or ""
+    adname = poi.get("adname") or ""
+    line = name
+    extras = [x for x in [city, adname, address] if x]
+    if extras:
+        line += " | " + " ".join(extras)
+    return line
+
+
+def resolve_place(query, city, key, config, prefer_poi=True):
+    normalized = normalize_alias(query, config)
+    if not normalized:
+        raise TrafficQueryError("Empty place query")
+
+    poi_candidates = []
+    if prefer_poi:
+        try:
+            poi_candidates = poi_search(normalized, city, key, limit=8, city_limit=False)
+        except Exception:
+            poi_candidates = []
+
+    scored = sorted(
+        ((score_poi_match(normalized, poi), poi) for poi in poi_candidates),
+        key=lambda x: x[0],
+        reverse=True,
+    )
+    top_score = scored[0][0] if scored else -1
+    top_pois = [poi for score, poi in scored if score == top_score and score >= 40][:3]
+
+    if len(top_pois) > 1:
+        raise TrafficQueryError(
+            "地点不够精确，请从以下候选里选一个后重试：\n- "
+            + "\n- ".join(format_poi_candidate(p) for p in top_pois)
+        )
+
+    if len(top_pois) == 1:
+        poi = top_pois[0]
+        location = poi.get("location")
+        if not location:
+            raise TrafficQueryError(f"POI missing location: {poi.get('name') or normalized}")
+        return {
+            "query": query,
+            "resolved": normalized,
+            "formatted_address": poi.get("name") or normalized,
+            "location": location,
+            "city": poi.get("cityname") or city,
+            "match_type": "poi",
+            "confidence": "high",
+            "note": None,
+        }
+
     payload = http_get_json(
         "/v3/geocode/geo",
-        {"key": key, "address": query_address, **({"city": city} if city else {})},
+        {"key": key, "address": normalized, **({"city": city} if city else {})},
     )
     geocodes = payload.get("geocodes") or []
     if not geocodes:
-        raise TrafficQueryError(f"Geocode failed: {query_address}")
+        raise TrafficQueryError(f"Place resolve failed: {normalized}")
     top = geocodes[0]
     location = top.get("location")
     if not location:
-        raise TrafficQueryError(f"Missing location for: {query_address}")
+        raise TrafficQueryError(f"Missing location for: {normalized}")
+
+    confidence = "high"
+    note = None
+    formatted = top.get("formatted_address") or normalized
+    if normalized not in formatted and (top.get("district") or top.get("city") or top.get("province")):
+        confidence = "approx"
+        note = f"未精确命中“{query}”，当前只命中到“{formatted}”范围；结果为近似值，仅供参考。"
+
     return {
-        "query": address,
-        "resolved": query_address,
-        "formatted_address": top.get("formatted_address") or query_address,
+        "query": query,
+        "resolved": normalized,
+        "formatted_address": formatted,
         "location": location,
         "city": top.get("city") or city,
+        "match_type": "geocode",
+        "confidence": confidence,
+        "note": note,
     }
 
 
 def route_command(args, config):
     key = get_api_key(args, config)
-    origin = geocode(args.origin, args.city, key, config)
-    destination = geocode(args.destination, args.city, key, config)
+    origin = resolve_place(args.origin, args.city, key, config)
+    destination = resolve_place(args.destination, args.city, key, config)
     payload = http_get_json(
         "/v3/direction/driving",
         {
@@ -125,6 +233,10 @@ def route_command(args, config):
     if taxi_cost:
         print(f"打车参考: ¥{taxi_cost}")
     print(f"红绿灯: {traffic_lights}")
+    if origin.get("note"):
+        print(f"提示: {origin['note']}")
+    if destination.get("note"):
+        print(f"提示: {destination['note']}")
     steps = path.get("steps") or []
     for idx, step in enumerate(steps[: args.steps], start=1):
         instruction = (step.get("instruction") or "").replace("<br>", " ").strip()
@@ -166,22 +278,13 @@ def traffic_road_command(args, config):
 
 def poi_command(args, config):
     key = get_api_key(args, config)
-    params = {
-        "key": key,
-        "keywords": args.keyword,
-        "offset": args.limit,
-        "page": 1,
-        "extensions": "all",
-    }
-    if args.city:
-        params["city"] = args.city
-        params["citylimit"] = "true" if args.city_limit else "false"
+    location = None
     if args.around:
-        center = geocode(args.around, args.city, key, config)
-        params["location"] = center["location"]
-        params["sortrule"] = "distance"
-    payload = http_get_json("/v5/place/text", params)
-    pois = payload.get("pois") or []
+        center = resolve_place(args.around, args.city, key, config)
+        location = center["location"]
+        if center.get("note"):
+            print(f"提示: {center['note']}")
+    pois = poi_search(args.keyword, args.city, key, location=location, limit=args.limit, city_limit=args.city_limit)
     if not pois:
         raise TrafficQueryError("No POI results")
     for idx, poi in enumerate(pois[: args.limit], start=1):
