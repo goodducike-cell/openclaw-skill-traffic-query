@@ -3,13 +3,33 @@
   "aliases": {
     "home": {
       "name": "家",
+      "aliases": ["我家", "老家", "住的地方"],
       "city": "深圳",
       "full_address": "深圳市南山区科技园"
     },
     "work": {
       "name": "公司",
+      "aliases": ["单位", "上班地点", "办公室"],
       "city": "深圳",
       "full_address": "深圳市南山区软件产业基地"
+    },
+    "airport": {
+      "name": "机场",
+      "aliases": ["宝安机场", "深圳机场"],
+      "city": "深圳",
+      "full_address": "深圳宝安国际机场"
+    },
+    "hospital": {
+      "name": "医院",
+      "aliases": ["人民医院", "常去医院"],
+      "city": "深圳",
+      "full_address": "北京大学深圳医院"
+    },
+    "school": {
+      "name": "学校",
+      "aliases": ["孩子学校", "儿子学校"],
+      "city": "深圳",
+      "full_address": "深圳大学"
     }
   }
 }

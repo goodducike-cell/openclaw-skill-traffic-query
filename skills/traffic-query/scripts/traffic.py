@@ -13,6 +13,7 @@ SKILL_DIR = SCRIPT_DIR.parent
 CONFIG_PATH = SKILL_DIR / "config.json"
 CONFIG_EXAMPLE_PATH = SKILL_DIR / "config.example.json"
 AMAP_BASE = "https://restapi.amap.com"
+LAST_CANDIDATES_PATH = SKILL_DIR / ".last_candidates.json"
 
 
 class TrafficQueryError(Exception):
@@ -39,7 +40,7 @@ def get_api_key(args, config):
 def http_get_json(path, params):
     query = urllib.parse.urlencode(params)
     url = f"{AMAP_BASE}{path}?{query}"
-    req = urllib.request.Request(url, headers={"User-Agent": "openclaw-traffic-query/1.1"})
+    req = urllib.request.Request(url, headers={"User-Agent": "openclaw-traffic-query/1.2"})
     with urllib.request.urlopen(req, timeout=20) as resp:
         charset = resp.headers.get_content_charset() or "utf-8"
         data = resp.read().decode(charset)
@@ -53,23 +54,43 @@ def aliases(config):
     return config.get("aliases") or {}
 
 
-def normalize_alias(name, config):
+def alias_phrases(alias_key, alias_obj):
+    phrases = set()
+    if alias_key:
+        phrases.add(str(alias_key).strip())
+    if alias_obj.get("name"):
+        phrases.add(str(alias_obj["name"]).strip())
+    for item in alias_obj.get("aliases") or []:
+        if item:
+            phrases.add(str(item).strip())
+    return {p for p in phrases if p}
+
+
+def resolve_alias(name, config):
     raw = (name or "").strip()
     if not raw:
-        return raw
+        return None
     mapping = aliases(config)
-    if raw in mapping:
-        alias = mapping[raw]
-        return alias.get("full_address") or alias.get("name") or raw
     for key, alias in mapping.items():
-        alias_name = str(alias.get("name") or "").strip()
-        if raw == alias_name:
-            return alias.get("full_address") or raw
-        if raw in {"家", "我家"} and key == "home":
-            return alias.get("full_address") or raw
-        if raw in {"公司", "单位", "上班地点"} and key == "work":
-            return alias.get("full_address") or raw
-    return raw
+        if raw in alias_phrases(key, alias):
+            return {
+                "key": key,
+                "name": alias.get("name") or raw,
+                "full_address": alias.get("full_address") or alias.get("name") or raw,
+                "city": alias.get("city"),
+                "raw": raw,
+            }
+    return None
+
+
+def normalize_alias(name, config):
+    resolved = resolve_alias(name, config)
+    return resolved["full_address"] if resolved else (name or "").strip()
+
+
+def alias_city(name, config):
+    resolved = resolve_alias(name, config)
+    return resolved.get("city") if resolved else None
 
 
 def poi_search(keyword, city, key, location=None, limit=5, city_limit=False):
@@ -105,7 +126,7 @@ def score_poi_match(query, poi):
         score += 20
     if query and query in adname:
         score += 10
-    if any(k in type_name for k in ["商务住宅", "公司企业", "购物", "餐饮", "风景名胜", "医院", "学校"]):
+    if any(k in type_name for k in ["商务住宅", "公司企业", "购物", "餐饮", "风景名胜", "医院", "学校", "机场"]):
         score += 5
     distance = poi.get("distance")
     try:
@@ -129,10 +150,97 @@ def format_poi_candidate(poi):
     return line
 
 
+def candidate_entry_from_poi(poi):
+    return {
+        "name": poi.get("name") or "未知",
+        "formatted_address": format_poi_candidate(poi),
+        "location": poi.get("location"),
+        "city": poi.get("cityname"),
+        "source": "poi",
+    }
+
+
+def save_candidates(kind, query, candidates):
+    payload = {"kind": kind, "query": query, "candidates": candidates}
+    LAST_CANDIDATES_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load_candidates():
+    if not LAST_CANDIDATES_PATH.exists():
+        raise TrafficQueryError("没有可选候选点记录，请先执行一次返回候选列表的查询。")
+    return json.loads(LAST_CANDIDATES_PATH.read_text(encoding="utf-8"))
+
+
+def parse_selection(value):
+    raw = (value or "").strip()
+    prefixes = ["选", "选择", "第"]
+    for prefix in prefixes:
+        if raw.startswith(prefix):
+            raw = raw[len(prefix):]
+    raw = raw.replace("个", "").replace("项", "").replace("号", "").strip()
+    if raw.endswith("项"):
+        raw = raw[:-1]
+    try:
+        idx = int(raw)
+        if idx < 1:
+            raise ValueError
+        return idx
+    except ValueError:
+        raise TrafficQueryError(f"无法识别候选编号：{value}")
+
+
+def resolve_selection(value):
+    data = load_candidates()
+    idx = parse_selection(value)
+    candidates = data.get("candidates") or []
+    if idx > len(candidates):
+        raise TrafficQueryError(f"候选编号超出范围：{idx}，当前只有 {len(candidates)} 个候选。")
+    selected = candidates[idx - 1]
+    return {
+        "query": value,
+        "resolved": selected.get("name"),
+        "formatted_address": selected.get("formatted_address") or selected.get("name"),
+        "location": selected.get("location"),
+        "city": selected.get("city"),
+        "match_type": selected.get("source") or "selection",
+        "confidence": "selected",
+        "note": f"已按候选编号选择：{selected.get('formatted_address') or selected.get('name')}",
+    }
+
+
 def resolve_place(query, city, key, config, prefer_poi=True):
+    if (query or "").strip().startswith(("选", "选择", "第")):
+        return resolve_selection(query)
+
+    alias_resolved = resolve_alias(query, config)
+    alias_based_city = alias_resolved.get("city") if alias_resolved else alias_city(query, config)
+    city = city or alias_based_city
     normalized = normalize_alias(query, config)
     if not normalized:
         raise TrafficQueryError("Empty place query")
+
+    if alias_resolved:
+        payload = http_get_json(
+            "/v3/geocode/geo",
+            {"key": key, "address": normalized, **({"city": city} if city else {})},
+        )
+        geocodes = payload.get("geocodes") or []
+        if not geocodes:
+            raise TrafficQueryError(f"Alias resolve failed: {query}")
+        top = geocodes[0]
+        location = top.get("location")
+        if not location:
+            raise TrafficQueryError(f"Missing location for alias: {query}")
+        return {
+            "query": query,
+            "resolved": normalized,
+            "formatted_address": alias_resolved.get("name") or normalized,
+            "location": location,
+            "city": top.get("city") or city,
+            "match_type": "alias",
+            "confidence": "high",
+            "note": None,
+        }
 
     poi_candidates = []
     if prefer_poi:
@@ -147,12 +255,15 @@ def resolve_place(query, city, key, config, prefer_poi=True):
         reverse=True,
     )
     top_score = scored[0][0] if scored else -1
-    top_pois = [poi for score, poi in scored if score == top_score and score >= 40][:3]
+    top_pois = [poi for score, poi in scored if score == top_score and score >= 40][:5]
 
     if len(top_pois) > 1:
+        candidates = [candidate_entry_from_poi(p) for p in top_pois]
+        save_candidates("place", query, candidates)
         raise TrafficQueryError(
-            "地点不够精确，请从以下候选里选一个后重试：\n- "
-            + "\n- ".join(format_poi_candidate(p) for p in top_pois)
+            "地点不够精确，请从以下候选里选一个后重试：\n"
+            + "\n".join(f"{i}. {c['formatted_address']}" for i, c in enumerate(candidates, start=1))
+            + "\n例如：直接回复“选 1”"
         )
 
     if len(top_pois) == 1:
